@@ -47,11 +47,21 @@ fn main() {
 
         match choice {
             "1" => {
-                run_job("国补上传情况汇总.xlsx", &input_dir, &output_dir, generate_summary_workbook);
+                run_job(
+                    "国补上传情况汇总.xlsx",
+                    &input_dir,
+                    &output_dir,
+                    generate_summary_workbook,
+                );
                 wait_for_return();
             }
             "2" => {
-                run_job("26年国补门店财务统筹表.xlsx", &input_dir, &output_dir, generate_store_finance_workbook);
+                run_job(
+                    "26年国补门店财务统筹表.xlsx",
+                    &input_dir,
+                    &output_dir,
+                    generate_store_finance_workbook,
+                );
                 wait_for_return();
             }
             "0" | "exit" | "quit" => {
@@ -76,7 +86,8 @@ fn prompt_input_directory() -> Option<PathBuf> {
         }
 
         let input = input.trim().trim_matches(['\'', '"']);
-        if input == "0" || input.eq_ignore_ascii_case("exit") || input.eq_ignore_ascii_case("quit") {
+        if input == "0" || input.eq_ignore_ascii_case("exit") || input.eq_ignore_ascii_case("quit")
+        {
             return None;
         }
 

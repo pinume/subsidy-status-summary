@@ -1,16 +1,17 @@
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::BufReader;
-use std::path::Path;
 use calamine::{Data, DataType, Reader, open_workbook_auto};
 use quick_xml::Reader as XmlReader;
 use quick_xml::events::Event;
 use rust_decimal::Decimal;
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::BufReader;
+use std::path::Path;
 use zip::ZipArchive;
 
 /// Read all rows from the first sheet of an Excel file.
 pub fn read_sheet_rows(path: &Path) -> Result<Vec<Vec<Data>>, String> {
-    let mut workbook = open_workbook_auto(path).map_err(|e| format!("打开文件 {:?} 失败: {}", path, e))?;
+    let mut workbook =
+        open_workbook_auto(path).map_err(|e| format!("打开文件 {:?} 失败: {}", path, e))?;
     let sheet_names = workbook.sheet_names();
     if sheet_names.is_empty() {
         return Err(format!("文件 {:?} 中未找到任何工作表", path));
@@ -60,6 +61,67 @@ impl HeaderMap {
             .get(&key)
             .and_then(|ids| ids.get(occurrence.checked_sub(1)?).copied())
     }
+
+    /// Require a column name, returning error if not found
+    pub fn require(&self, name: &str, file_label: &str) -> Result<usize, String> {
+        self.find(&[name])
+            .ok_or_else(|| format!("{}: 缺少必要列 [{}]", file_label, name))
+    }
+}
+
+/// Frequently accessed column indices in uploaded spreadsheets
+#[derive(Debug, Clone, Copy)]
+pub struct UploadColumns {
+    pub status: usize,
+    pub subsidy: usize,
+    pub reference: usize,
+    pub invoice: usize,
+}
+
+impl UploadColumns {
+    pub fn from_header(h: &HeaderMap, file_label: &str) -> Result<Self, String> {
+        Ok(Self {
+            status: h.require("状态", file_label)?,
+            subsidy: h.require("补贴金额", file_label)?,
+            reference: h.require("检索参考号", file_label)?,
+            invoice: h.require("发票号码", file_label)?,
+        })
+    }
+}
+
+/// Extract unique non-empty merchant code from rows, ensuring consistency across data rows
+pub fn extract_unique_merchant_code(
+    rows: &[Vec<Data>],
+    file_label: &str,
+) -> Result<String, String> {
+    if rows.len() < 2 {
+        return Err(format!("{}: 数据为空", file_label));
+    }
+    let h = HeaderMap::from_header_row(&rows[0]);
+    let mch_idx = h.require("商户号", file_label)?;
+
+    let mut found_code = None;
+    for (r_idx, row) in rows.iter().enumerate().skip(1) {
+        if mch_idx < row.len() {
+            let code = cell_to_string(&row[mch_idx]);
+            if !code.is_empty() {
+                match &found_code {
+                    None => found_code = Some(code),
+                    Some(first) if first != &code => {
+                        return Err(format!(
+                            "{}: 第 {} 行商户号 '{}' 与首个商户号 '{}' 不一致，存在歧义",
+                            file_label,
+                            r_idx + 1,
+                            code,
+                            first
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    found_code.ok_or_else(|| format!("{}: 未找到任何有效商户号", file_label))
 }
 
 /// Convert calamine cell data to clean String
@@ -94,9 +156,7 @@ pub fn cell_to_decimal(cell: &Data) -> Option<Decimal> {
     match cell {
         Data::Empty => None,
         Data::Int(i) => Some(Decimal::from(*i)),
-        Data::Float(f) => Decimal::from_str_exact(&format!("{:.4}", f))
-            .or_else(|_| Decimal::try_from(*f))
-            .ok(),
+        Data::Float(f) => Decimal::from_f64_retain(*f),
         Data::String(s) => {
             let s_clean = s.trim().replace(',', "");
             Decimal::from_str_exact(&s_clean).ok()
@@ -150,7 +210,10 @@ pub fn get_colored_row_indices(path: &Path, target_hex: &str) -> Result<HashSet<
                         let mut fill_id = 0;
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"fillId" {
-                                if let Ok(id) = std::str::from_utf8(&attr.value).unwrap_or("0").parse::<usize>() {
+                                if let Ok(id) = std::str::from_utf8(&attr.value)
+                                    .unwrap_or("0")
+                                    .parse::<usize>()
+                                {
                                     fill_id = id;
                                 }
                             }
@@ -211,7 +274,10 @@ pub fn get_colored_row_indices(path: &Path, target_hex: &str) -> Result<HashSet<
                 b"row" => {
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"r" {
-                            if let Ok(r) = std::str::from_utf8(&attr.value).unwrap_or("0").parse::<u32>() {
+                            if let Ok(r) = std::str::from_utf8(&attr.value)
+                                .unwrap_or("0")
+                                .parse::<u32>()
+                            {
                                 current_row = r;
                             }
                         }
@@ -220,7 +286,10 @@ pub fn get_colored_row_indices(path: &Path, target_hex: &str) -> Result<HashSet<
                 b"c" => {
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"s" {
-                            if let Ok(s) = std::str::from_utf8(&attr.value).unwrap_or("0").parse::<usize>() {
+                            if let Ok(s) = std::str::from_utf8(&attr.value)
+                                .unwrap_or("0")
+                                .parse::<usize>()
+                            {
                                 if target_xfs.contains(&s) && current_row > 0 {
                                     matching_rows.insert(current_row);
                                 }
