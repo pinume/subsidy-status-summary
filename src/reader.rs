@@ -1,0 +1,241 @@
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::BufReader;
+use std::path::Path;
+use calamine::{Data, DataType, Reader, open_workbook_auto};
+use quick_xml::Reader as XmlReader;
+use quick_xml::events::Event;
+use rust_decimal::Decimal;
+use zip::ZipArchive;
+
+/// Read all rows from the first sheet of an Excel file.
+pub fn read_sheet_rows(path: &Path) -> Result<Vec<Vec<Data>>, String> {
+    let mut workbook = open_workbook_auto(path).map_err(|e| format!("打开文件 {:?} 失败: {}", path, e))?;
+    let sheet_names = workbook.sheet_names();
+    if sheet_names.is_empty() {
+        return Err(format!("文件 {:?} 中未找到任何工作表", path));
+    }
+    let range = workbook
+        .worksheet_range(&sheet_names[0])
+        .map_err(|e| format!("读取工作表 {} 失败: {}", sheet_names[0], e))?;
+
+    let rows: Vec<Vec<Data>> = range.rows().map(|r| r.to_vec()).collect();
+    Ok(rows)
+}
+
+/// Dynamic header mapper for finding columns by name or alias.
+#[derive(Debug, Clone)]
+pub struct HeaderMap {
+    // column name (lowercase) -> list of 0-based column indices
+    map: HashMap<String, Vec<usize>>,
+}
+
+impl HeaderMap {
+    pub fn from_header_row(row: &[Data]) -> Self {
+        let mut map: HashMap<String, Vec<usize>> = HashMap::new();
+        for (idx, cell) in row.iter().enumerate() {
+            let name = cell.to_string().trim().to_string();
+            if !name.is_empty() {
+                map.entry(name.to_lowercase()).or_default().push(idx);
+            }
+        }
+        Self { map }
+    }
+
+    /// Find single column index by exact name or aliases
+    pub fn find(&self, names: &[&str]) -> Option<usize> {
+        for name in names {
+            let key = name.trim().to_lowercase();
+            if let Some(first) = self.map.get(&key).and_then(|ids| ids.first().copied()) {
+                return Some(first);
+            }
+        }
+        None
+    }
+
+    /// Find N-th occurrence of a column name (1-based occurrence)
+    pub fn find_occurrence(&self, name: &str, occurrence: usize) -> Option<usize> {
+        let key = name.trim().to_lowercase();
+        self.map
+            .get(&key)
+            .and_then(|ids| ids.get(occurrence.checked_sub(1)?).copied())
+    }
+}
+
+/// Convert calamine cell data to clean String
+pub fn cell_to_string(cell: &Data) -> String {
+    match cell {
+        Data::Empty => String::new(),
+        Data::String(s) => s.trim().to_string(),
+        Data::Float(f) => {
+            if f.fract() == 0.0 && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
+                format!("{}", *f as i64)
+            } else {
+                format!("{}", f)
+            }
+        }
+        Data::Int(i) => format!("{}", i),
+        Data::Bool(b) => format!("{}", b),
+        Data::DateTime(dt) => {
+            if let Some(chrono_dt) = cell.as_datetime() {
+                chrono_dt.format("%Y-%m-%d %H:%M:%S").to_string()
+            } else {
+                format!("{}", dt)
+            }
+        }
+        Data::DateTimeIso(s) => s.clone(),
+        Data::DurationIso(s) => s.clone(),
+        Data::Error(e) => format!("#ERR:{:?}", e),
+    }
+}
+
+/// Convert calamine cell data to Decimal for high precision money calculation
+pub fn cell_to_decimal(cell: &Data) -> Option<Decimal> {
+    match cell {
+        Data::Empty => None,
+        Data::Int(i) => Some(Decimal::from(*i)),
+        Data::Float(f) => Decimal::from_str_exact(&format!("{:.4}", f))
+            .or_else(|_| Decimal::try_from(*f))
+            .ok(),
+        Data::String(s) => {
+            let s_clean = s.trim().replace(',', "");
+            Decimal::from_str_exact(&s_clean).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Extract 1-indexed row numbers that have cell fill color matching `target_hex`
+pub fn get_colored_row_indices(path: &Path, target_hex: &str) -> Result<HashSet<u32>, String> {
+    let file = File::open(path).map_err(|e| format!("打开 {:?} 失败: {}", path, e))?;
+    let mut zip = ZipArchive::new(BufReader::new(file))
+        .map_err(|e| format!("解压 {:?} 失败: {}", path, e))?;
+
+    let clean_target = target_hex.trim_start_matches('#').to_uppercase();
+
+    // 1. Parse xl/styles.xml in separate scope so zip can be reused
+    let target_xfs = {
+        let mut styles_file = zip
+            .by_name("xl/styles.xml")
+            .map_err(|e| format!("读取 xl/styles.xml 失败: {}", e))?;
+
+        let mut xml_buf = Vec::new();
+        let mut reader = XmlReader::from_reader(BufReader::new(&mut styles_file));
+        reader.config_mut().trim_text(true);
+
+        let mut in_fills = false;
+        let mut fills: Vec<Option<String>> = Vec::new();
+        let mut in_cell_xfs = false;
+        let mut xf_fill_ids: Vec<usize> = Vec::new();
+
+        let mut current_fill_color: Option<String> = None;
+
+        loop {
+            match reader.read_event_into(&mut xml_buf) {
+                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => match e.name().as_ref() {
+                    b"fills" => in_fills = true,
+                    b"fill" if in_fills => {
+                        current_fill_color = None;
+                    }
+                    b"fgColor" if in_fills => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"rgb" {
+                                let val = String::from_utf8_lossy(&attr.value).to_uppercase();
+                                current_fill_color = Some(val);
+                            }
+                        }
+                    }
+                    b"cellXfs" => in_cell_xfs = true,
+                    b"xf" if in_cell_xfs => {
+                        let mut fill_id = 0;
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"fillId" {
+                                if let Ok(id) = std::str::from_utf8(&attr.value).unwrap_or("0").parse::<usize>() {
+                                    fill_id = id;
+                                }
+                            }
+                        }
+                        xf_fill_ids.push(fill_id);
+                    }
+                    _ => {}
+                },
+                Ok(Event::End(ref e)) => match e.name().as_ref() {
+                    b"fills" => in_fills = false,
+                    b"fill" if in_fills => {
+                        fills.push(current_fill_color.take());
+                    }
+                    b"cellXfs" => in_cell_xfs = false,
+                    _ => {}
+                },
+                Ok(Event::Eof) => break,
+                Err(e) => return Err(format!("解析 styles.xml 失败: {}", e)),
+                _ => {}
+            }
+            xml_buf.clear();
+        }
+
+        // Identify target XF indices
+        let mut xfs = HashSet::new();
+        for (xf_idx, &fill_id) in xf_fill_ids.iter().enumerate() {
+            if let Some(Some(color)) = fills.get(fill_id) {
+                if color == &clean_target
+                    || color.ends_with(&clean_target)
+                    || clean_target.ends_with(color)
+                {
+                    xfs.insert(xf_idx);
+                }
+            }
+        }
+        xfs
+    };
+
+    if target_xfs.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    // 2. Parse xl/worksheets/sheet1.xml
+    let mut sheet_file = zip
+        .by_name("xl/worksheets/sheet1.xml")
+        .map_err(|e| format!("读取 xl/worksheets/sheet1.xml 失败: {}", e))?;
+
+    let mut xml_buf = Vec::new();
+    let mut sheet_reader = XmlReader::from_reader(BufReader::new(&mut sheet_file));
+    sheet_reader.config_mut().trim_text(true);
+
+    let mut matching_rows = HashSet::new();
+    let mut current_row: u32 = 0;
+
+    loop {
+        match sheet_reader.read_event_into(&mut xml_buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => match e.name().as_ref() {
+                b"row" => {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"r" {
+                            if let Ok(r) = std::str::from_utf8(&attr.value).unwrap_or("0").parse::<u32>() {
+                                current_row = r;
+                            }
+                        }
+                    }
+                }
+                b"c" => {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"s" {
+                            if let Ok(s) = std::str::from_utf8(&attr.value).unwrap_or("0").parse::<usize>() {
+                                if target_xfs.contains(&s) && current_row > 0 {
+                                    matching_rows.insert(current_row);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("解析 sheet1.xml 失败: {}", e)),
+            _ => {}
+        }
+        xml_buf.clear();
+    }
+
+    Ok(matching_rows)
+}
