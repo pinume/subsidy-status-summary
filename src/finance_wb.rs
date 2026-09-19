@@ -1,11 +1,10 @@
 use calamine::Data;
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 use rust_xlsxwriter::{Workbook, Worksheet};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::excel::write_refund_cell;
+use crate::excel::{write_date_cell, write_refund_cell};
 use crate::reader::{
     HeaderMap, UploadColumns, cell_to_decimal, cell_to_string, extract_unique_merchant_code,
     read_sheet_rows,
@@ -15,7 +14,7 @@ use crate::styles::StylePool;
 /// Generate Workbook 2: 26年国补门店财务统筹表.xlsx (4 Sheets)
 pub fn generate_store_finance_workbook(input_dir: &Path, output_path: &Path) -> Result<(), String> {
     let mut workbook = Workbook::new();
-    let styles = StylePool::new();
+    let styles = StylePool::default();
 
     // 1. Load source data
     let store_occ_rows = read_sheet_rows(&input_dir.join("银联交易明细门店.xlsx"))?;
@@ -239,10 +238,12 @@ fn build_final_match_sheet(
 
     let resolved_store_cols: Vec<(usize, u16)> = store_col_map
         .iter()
-        .filter_map(|(name, target_col)| {
-            store_h.find(&[name]).map(|src_idx| (src_idx, *target_col))
+        .map(|(name, target_col)| {
+            store_h
+                .require(name, "银联交易明细门店.xlsx")
+                .map(|src_idx| (src_idx, *target_col))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     for (r_idx, row) in store_occ.iter().enumerate().skip(1) {
         let cur_row = r_idx as u32; // Row 1 is header, data starts at row 1
@@ -259,16 +260,11 @@ fn build_final_match_sheet(
                 let cell = &row[src_idx];
                 match target_col {
                     1 | 2 => {
-                        let val = cell_to_string(cell);
-                        ws.write_string_with_format(cur_row, target_col, val, &s.datetime)
-                            .map_err(|e| e.to_string())?;
+                        write_date_cell(ws, cur_row, target_col, cell, &s.datetime)?;
                     }
                     6 | 7 | 8 | 20 => {
-                        let val = cell_to_decimal(cell)
-                            .unwrap_or(Decimal::ZERO)
-                            .to_f64()
-                            .unwrap_or(0.0);
-                        ws.write_number_with_format(cur_row, target_col, val, &s.money)
+                        let val = cell_to_decimal(cell).unwrap_or(Decimal::ZERO);
+                        ws.write_with_format(cur_row, target_col, val, &s.money)
                             .map_err(|e| e.to_string())?;
                     }
                     3 | 4 => {
@@ -372,9 +368,12 @@ fn build_store_occurrence_sheet(
     }
 
     // Row 1: Header (26 columns straight from source)
+    if store_occ[0].len() < 26 {
+        return Err("银联交易明细门店.xlsx: 表头不足 26 列".to_string());
+    }
     ws.set_row_height(0, 30.0).map_err(|e| e.to_string())?;
-    for col in 0..26 {
-        let name = cell_to_string(&store_occ[0][col]);
+    for (col, cell) in store_occ[0].iter().take(26).enumerate() {
+        let name = cell_to_string(cell);
         ws.write_string_with_format(0, col as u16, name, &s.col_header)
             .map_err(|e| e.to_string())?;
     }
@@ -394,9 +393,7 @@ fn build_store_occurrence_sheet(
             match col {
                 // DateTime: 0:清算时间, 1:交易时间
                 0 | 1 => {
-                    let val = cell_to_string(cell);
-                    ws.write_string_with_format(cur_row, col as u16, val, &s.datetime)
-                        .map_err(|e| e.to_string())?;
+                    write_date_cell(ws, cur_row, col as u16, cell, &s.datetime)?;
                 }
                 // Center strings: 2:终端号, 3:交易类型
                 2 | 3 => {
@@ -407,13 +404,8 @@ fn build_store_occurrence_sheet(
                 // Money: 5:交易金额, 6:清算金额, 7:手续费, 8:T0手续费, 9:D1手续费, 21:优惠金额, 22:分期手续费
                 5 | 6 | 7 | 8 | 9 | 21 | 22 => {
                     if let Some(dec) = cell_to_decimal(cell) {
-                        ws.write_number_with_format(
-                            cur_row,
-                            col as u16,
-                            dec.to_f64().unwrap_or(0.0),
-                            &s.money,
-                        )
-                        .map_err(|e| e.to_string())?;
+                        ws.write_with_format(cur_row, col as u16, dec, &s.money)
+                            .map_err(|e| e.to_string())?;
                     } else {
                         ws.write_string_with_format(cur_row, col as u16, "", &s.text_right)
                             .map_err(|e| e.to_string())?;
@@ -454,9 +446,12 @@ fn build_store_refund_sheet(
     }
 
     // Header (24 columns from source)
+    if app_refund[0].len() < 24 {
+        return Err("回款明细家电电脑.xlsx: 表头不足 24 列".to_string());
+    }
     ws.set_row_height(0, 30.0).map_err(|e| e.to_string())?;
-    for col in 0..24 {
-        let name = cell_to_string(&app_refund[0][col]);
+    for (col, cell) in app_refund[0].iter().take(24).enumerate() {
+        let name = cell_to_string(cell);
         ws.write_string_with_format(0, col as u16, name, &s.col_header)
             .map_err(|e| e.to_string())?;
     }
@@ -506,8 +501,8 @@ fn build_store_upload_sheet(
         .map_err(|e| e.to_string())?;
     ws.set_freeze_panes(1, 0).map_err(|e| e.to_string())?;
 
-    // 61 column headers and widths as defined in Section 5.5.2
-    let col_defs: [(&str, f64); 61] = [
+    // 60 column headers and widths as defined in Section 5.4.2
+    let col_defs: [(&str, f64); 60] = [
         ("实时清分UUID", 28.0),
         ("商户号", 18.0),
         ("商户名称", 24.0),
@@ -568,7 +563,6 @@ fn build_store_upload_sheet(
         ("收货地址是否农村地区", 20.0),
         ("airConditionerKitInfo", 22.0),
         ("开票日期", 14.0),
-        ("补贴金额", 14.0),
     ];
 
     for (col, (_, w)) in col_defs.iter().enumerate() {
@@ -592,43 +586,52 @@ fn build_store_upload_sheet(
     let app_h = HeaderMap::from_header_row(&app_up[0]);
     let dig_h = HeaderMap::from_header_row(&dig_up[0]);
 
-    // Build 61-column index extractor parameterized by category
-    let resolve_indices = |h: &HeaderMap, is_dig: bool| -> Vec<Option<usize>> {
-        (0..61)
-            .map(|col| match col {
-                22 => h.find_occurrence("图片1", 1),
-                25 | 26 => {
-                    if is_dig {
-                        h.find(&[col_defs[col].0])
-                    } else {
-                        None
+    // Build output-column index extractor parameterized by category
+    let resolve_indices =
+        |h: &HeaderMap, is_dig: bool, label: &str| -> Result<Vec<Option<usize>>, String> {
+            (0..col_defs.len())
+                .map(|col| {
+                    let optional =
+                        (!is_dig && matches!(col, 25 | 26)) || (is_dig && matches!(col, 44 | 58));
+                    let index = match col {
+                        22 => h.find_occurrence("图片1", 1),
+                        25 | 26 => {
+                            if is_dig {
+                                h.find(&[col_defs[col].0])
+                            } else {
+                                None
+                            }
+                        }
+                        27 => h.find_occurrence("图片1", 2),
+                        31 => h.find(&["img5", "图片5"]),
+                        32 => h.find(&["img6", "图片6"]),
+                        44 => {
+                            if is_dig {
+                                None
+                            } else {
+                                h.find(&["EEG"])
+                            }
+                        }
+                        56 => h.find(&["交旧品类", "oldExchangeType"]),
+                        58 => {
+                            if is_dig {
+                                None
+                            } else {
+                                h.find(&["airConditionerKitInfo"])
+                            }
+                        }
+                        _ => h.find(&[col_defs[col].0]),
+                    };
+                    if index.is_none() && !optional {
+                        return Err(format!("{}: 缺少必要列 [{}]", label, col_defs[col].0));
                     }
-                }
-                27 => h.find_occurrence("图片1", 2),
-                31 => h.find(&["img5", "图片5"]),
-                32 => h.find(&["img6", "图片6"]),
-                44 => {
-                    if is_dig {
-                        None
-                    } else {
-                        h.find(&["EEG"])
-                    }
-                }
-                56 => h.find(&["交旧品类", "oldExchangeType"]),
-                58 => {
-                    if is_dig {
-                        None
-                    } else {
-                        h.find(&["airConditionerKitInfo"])
-                    }
-                }
-                _ => h.find(&[col_defs[col].0]),
-            })
-            .collect()
-    };
+                    Ok(index)
+                })
+                .collect()
+        };
 
-    let app_map = resolve_indices(&app_h, false);
-    let dig_map = resolve_indices(&dig_h, true);
+    let app_map = resolve_indices(&app_h, false, "已上传家电电脑.xlsx")?;
+    let dig_map = resolve_indices(&dig_h, true, "已上传数码.xlsx")?;
 
     let mut cur_row: u32 = 1;
 
@@ -640,35 +643,26 @@ fn build_store_upload_sheet(
         for row in &rows[1..] {
             ws.set_row_height(*cur_row, 22.0)
                 .map_err(|e| e.to_string())?;
-            for col in 0..61 {
-                let cell = match col_map[col] {
-                    Some(src_col) if src_col < row.len() => &row[src_col],
+            for (col, source_col) in col_map.iter().enumerate() {
+                let cell = match source_col {
+                    Some(src_col) if *src_col < row.len() => &row[*src_col],
                     _ => &Data::Empty,
                 };
 
                 match col {
                     // Date: 4:交易日期, 59:开票日期
                     4 | 59 => {
-                        let val = cell_to_string(cell);
-                        ws.write_string_with_format(*cur_row, col as u16, val, &s.date)
-                            .map_err(|e| e.to_string())?;
+                        write_date_cell(ws, *cur_row, col as u16, cell, &s.date)?;
                     }
                     // DateTime: 10:提交时间, 11:更新时间, 42:签收时间
                     10 | 11 | 42 => {
-                        let val = cell_to_string(cell);
-                        ws.write_string_with_format(*cur_row, col as u16, val, &s.datetime)
-                            .map_err(|e| e.to_string())?;
+                        write_date_cell(ws, *cur_row, col as u16, cell, &s.datetime)?;
                     }
-                    // Money: 5:交易金额, 20:发票金额, 54:subsideAmt, 60:补贴金额
-                    5 | 20 | 54 | 60 => {
+                    // Money: 5:交易金额, 20:发票金额, 54:subsideAmt
+                    5 | 20 | 54 => {
                         if let Some(dec) = cell_to_decimal(cell) {
-                            ws.write_number_with_format(
-                                *cur_row,
-                                col as u16,
-                                dec.to_f64().unwrap_or(0.0),
-                                &s.money,
-                            )
-                            .map_err(|e| e.to_string())?;
+                            ws.write_with_format(*cur_row, col as u16, dec, &s.money)
+                                .map_err(|e| e.to_string())?;
                         } else {
                             ws.write_string_with_format(*cur_row, col as u16, "", &s.text_right)
                                 .map_err(|e| e.to_string())?;

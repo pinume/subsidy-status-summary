@@ -5,17 +5,19 @@ use rust_xlsxwriter::{Workbook, Worksheet};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::excel::write_refund_cell;
+use crate::excel::{write_date_cell, write_refund_cell};
 use crate::reader::{
     HeaderMap, UploadColumns, cell_to_decimal, cell_to_string, extract_unique_merchant_code,
     get_colored_row_indices, read_sheet_rows,
 };
 use crate::styles::StylePool;
 
+type UploadTotals = (HashMap<String, Decimal>, HashMap<String, i64>);
+
 /// Generate Workbook 1: 国补上传情况汇总.xlsx (5 Sheets)
 pub fn generate_summary_workbook(input_dir: &Path, output_path: &Path) -> Result<(), String> {
     let mut workbook = Workbook::new();
-    let styles = StylePool::new();
+    let styles = StylePool::default();
 
     // 1. Load source data
     let sales_rows = read_sheet_rows(&input_dir.join("销售用券情况统计.xlsx"))?;
@@ -116,9 +118,7 @@ fn build_summary_sheet(
     }
 
     // Aggregation helper for uploaded data
-    let count_uploaded = |rows: &[Vec<Data>],
-                          label: &str|
-     -> Result<(HashMap<String, Decimal>, HashMap<String, i64>), String> {
+    let count_uploaded = |rows: &[Vec<Data>], label: &str| -> Result<UploadTotals, String> {
         let cols = UploadColumns::from_header(&HeaderMap::from_header_row(&rows[0]), label)?;
         let mut amt_map = HashMap::new();
         let mut cnt_map = HashMap::new();
@@ -169,7 +169,7 @@ fn build_summary_sheet(
     let dig_unup_cnt = dig_unpaid_cnt - dig_pass_cnt - dig_wait_cnt - dig_fail_cnt;
 
     // Convert Yuan to Wan Yuan
-    let to_wan = |d: Decimal| (d / Decimal::from(10000)).to_f64().unwrap_or(0.0);
+    let to_wan = |d: Decimal| d / Decimal::from(10000);
 
     // Row 1: Title
     ws.set_row_height(0, 30.0).map_err(|e| e.to_string())?;
@@ -283,15 +283,15 @@ fn build_summary_sheet(
             .map_err(|e| e.to_string())?;
         ws.write_string_with_format(cur_row, 0, *name, &s.text_left)
             .map_err(|e| e.to_string())?;
-        ws.write_number_with_format(cur_row, 1, to_wan(*a_amt), &s.money)
+        ws.write_with_format(cur_row, 1, to_wan(*a_amt), &s.money)
             .map_err(|e| e.to_string())?;
         ws.write_number_with_format(cur_row, 2, *a_cnt as f64, &s.int_count)
             .map_err(|e| e.to_string())?;
-        ws.write_number_with_format(cur_row, 3, to_wan(*d_amt), &s.money)
+        ws.write_with_format(cur_row, 3, to_wan(*d_amt), &s.money)
             .map_err(|e| e.to_string())?;
         ws.write_number_with_format(cur_row, 4, *d_cnt as f64, &s.int_count)
             .map_err(|e| e.to_string())?;
-        ws.write_number_with_format(cur_row, 5, to_wan(*a_amt + *d_amt), &s.money)
+        ws.write_with_format(cur_row, 5, to_wan(*a_amt + *d_amt), &s.money)
             .map_err(|e| e.to_string())?;
         ws.write_number_with_format(cur_row, 6, (*a_cnt + *d_cnt) as f64, &s.int_count)
             .map_err(|e| e.to_string())?;
@@ -444,15 +444,15 @@ fn build_summary_sheet(
             .map_err(|e| e.to_string())?;
         ws.write_string_with_format(cur_row, 0, *name, &s.text_left)
             .map_err(|e| e.to_string())?;
-        ws.write_number_with_format(cur_row, 1, to_wan(*a_amt), &s.money)
+        ws.write_with_format(cur_row, 1, to_wan(*a_amt), &s.money)
             .map_err(|e| e.to_string())?;
         ws.write_number_with_format(cur_row, 2, *a_pct, &s.percent)
             .map_err(|e| e.to_string())?;
-        ws.write_number_with_format(cur_row, 3, to_wan(*d_amt), &s.money)
+        ws.write_with_format(cur_row, 3, to_wan(*d_amt), &s.money)
             .map_err(|e| e.to_string())?;
         ws.write_number_with_format(cur_row, 4, *d_pct, &s.percent)
             .map_err(|e| e.to_string())?;
-        ws.write_number_with_format(cur_row, 5, to_wan(*t_amt), &s.money)
+        ws.write_with_format(cur_row, 5, to_wan(*t_amt), &s.money)
             .map_err(|e| e.to_string())?;
         ws.write_number_with_format(cur_row, 6, *t_pct, &s.percent)
             .map_err(|e| e.to_string())?;
@@ -548,11 +548,11 @@ fn build_category_brand_sheet(
 
     // Aggregation
     let h = HeaderMap::from_header_row(&sales[0]);
-    let cat_idx = h.find(&["财务大类"]).unwrap();
-    let brand_idx = h.find(&["品牌"]).unwrap();
-    let sub_idx = h.find(&["补贴额"]).unwrap();
-    let qty_idx = h.find(&["数量"]).unwrap();
-    let remark_idx = h.find(&["备注"]).unwrap();
+    let cat_idx = h.require("财务大类", "销售用券情况统计.xlsx")?;
+    let brand_idx = h.require("品牌", "销售用券情况统计.xlsx")?;
+    let sub_idx = h.require("补贴额", "销售用券情况统计.xlsx")?;
+    let qty_idx = h.require("数量", "销售用券情况统计.xlsx")?;
+    let remark_idx = h.require("备注", "销售用券情况统计.xlsx")?;
 
     // (Category, Brand) -> Status -> (Amount, Count)
     let mut matrix: HashMap<(String, String), HashMap<String, (Decimal, i64)>> = HashMap::new();
@@ -683,13 +683,8 @@ fn build_category_brand_sheet(
                     ws.write_string_with_format(row_idx, col_cnt, "-", &s.text_right)
                         .map_err(|e| e.to_string())?;
                 } else {
-                    ws.write_number_with_format(
-                        row_idx,
-                        col_amt,
-                        amt.to_f64().unwrap_or(0.0),
-                        &s.money,
-                    )
-                    .map_err(|e| e.to_string())?;
+                    ws.write_with_format(row_idx, col_amt, amt, &s.money)
+                        .map_err(|e| e.to_string())?;
                     ws.write_number_with_format(row_idx, col_cnt, cnt as f64, &s.int_count)
                         .map_err(|e| e.to_string())?;
                 }
@@ -751,7 +746,7 @@ fn build_failed_records_sheet(
         0,
         1,
         9,
-        "数据源：已上传家电电脑.xlsx、已上传数码.xlsx、发票明细.xlsx；发票金额单位：元",
+        "数据源：已上传家电电脑.xlsx、已上传数码.xlsx、发票明细.xlsx；家电电脑按商品名称升序；发票金额单位：元",
         &s.subtitle,
     )
     .map_err(|e| e.to_string())?;
@@ -799,18 +794,17 @@ fn build_failed_records_sheet(
                           extra2: Option<&str>,
                           cur_row: u32|
      -> Result<(), String> {
-        let date_idx = h.find(&["交易日期"]).unwrap();
-        let ref_idx = h.find(&["检索参考号"]).unwrap();
-        let desc_idx = h.find(&["描述"]).unwrap();
-        let inv_idx = h.find(&["发票号码"]).unwrap();
-        let inv_amt_idx = h.find(&["发票金额"]).unwrap();
-        let buyer_idx = h.find(&["购买方名称"]).unwrap();
-        let sn_idx = h.find(&["S/N码", "sn码"]).unwrap();
+        let date_idx = h.find(&["交易日期"]).ok_or("已上传明细缺少交易日期")?;
+        let ref_idx = h.find(&["检索参考号"]).ok_or("已上传明细缺少检索参考号")?;
+        let desc_idx = h.find(&["描述"]).ok_or("已上传明细缺少描述")?;
+        let inv_idx = h.find(&["发票号码"]).ok_or("已上传明细缺少发票号码")?;
+        let inv_amt_idx = h.find(&["发票金额"]).ok_or("已上传明细缺少发票金额")?;
+        let buyer_idx = h.find(&["购买方名称"]).ok_or("已上传明细缺少购买方名称")?;
+        let sn_idx = h.find(&["S/N码", "sn码"]).ok_or("已上传明细缺少 S/N码")?;
 
         ws.set_row_height(cur_row, 22.0)
             .map_err(|e| e.to_string())?;
-        ws.write_string_with_format(cur_row, 0, cell_to_string(&row[date_idx]), &s.date)
-            .map_err(|e| e.to_string())?;
+        write_date_cell(ws, cur_row, 0, &row[date_idx], &s.date)?;
         ws.write_string_with_format(cur_row, 1, cell_to_string(&row[ref_idx]), &s.text_left)
             .map_err(|e| e.to_string())?;
         ws.write_string_with_format(cur_row, 2, "审核失败", &s.text_left)
@@ -819,11 +813,8 @@ fn build_failed_records_sheet(
             .map_err(|e| e.to_string())?;
         ws.write_string_with_format(cur_row, 4, cell_to_string(&row[inv_idx]), &s.text_left)
             .map_err(|e| e.to_string())?;
-        let amt = cell_to_decimal(&row[inv_amt_idx])
-            .unwrap_or(Decimal::ZERO)
-            .to_f64()
-            .unwrap_or(0.0);
-        ws.write_number_with_format(cur_row, 5, amt, &s.money)
+        let amt = cell_to_decimal(&row[inv_amt_idx]).unwrap_or(Decimal::ZERO);
+        ws.write_with_format(cur_row, 5, amt, &s.money)
             .map_err(|e| e.to_string())?;
         ws.write_string_with_format(cur_row, 6, cell_to_string(&row[buyer_idx]), &s.text_left)
             .map_err(|e| e.to_string())?;
@@ -839,15 +830,24 @@ fn build_failed_records_sheet(
     };
 
     let app_h = HeaderMap::from_header_row(&app_up[0]);
-    let inv_idx = app_h.find(&["发票号码"]).unwrap();
-    let st_idx = app_h.find(&["状态"]).unwrap();
-    for row in &app_up[1..] {
-        if cell_to_string(&row[st_idx]) == "审核失败" {
-            let inv_no = cell_to_string(&row[inv_idx]);
-            let prod_name = invoice_name_map.get(&inv_no).cloned().unwrap_or_default();
-            write_fail_row(ws, row, &app_h, &prod_name, None, cur_row)?;
-            cur_row += 1;
-        }
+    let inv_idx = app_h.require("发票号码", "已上传家电电脑.xlsx")?;
+    let st_idx = app_h.require("状态", "已上传家电电脑.xlsx")?;
+    let mut app_failed: Vec<&Vec<Data>> = app_up[1..]
+        .iter()
+        .filter(|row| cell_to_string(&row[st_idx]) == "审核失败")
+        .collect();
+    app_failed.sort_by_key(|row| {
+        let name = invoice_name_map
+            .get(&cell_to_string(&row[inv_idx]))
+            .cloned()
+            .unwrap_or_default();
+        (name.is_empty(), name)
+    });
+    for row in app_failed {
+        let inv_no = cell_to_string(&row[inv_idx]);
+        let prod_name = invoice_name_map.get(&inv_no).cloned().unwrap_or_default();
+        write_fail_row(ws, row, &app_h, &prod_name, None, cur_row)?;
+        cur_row += 1;
     }
 
     // Blank row
@@ -889,9 +889,13 @@ fn build_failed_records_sheet(
     cur_row += 1;
 
     let dig_h = HeaderMap::from_header_row(&dig_up[0]);
-    let d_st_idx = dig_h.find(&["状态"]).unwrap();
-    let d_imei1_idx = dig_h.find(&["IMEI1", "imei1"]).unwrap();
-    let d_imei2_idx = dig_h.find(&["IMEI2", "imei2"]).unwrap();
+    let d_st_idx = dig_h.require("状态", "已上传数码.xlsx")?;
+    let d_imei1_idx = dig_h
+        .find(&["IMEI1", "imei1"])
+        .ok_or("已上传数码.xlsx: 缺少必要列 [IMEI1]")?;
+    let d_imei2_idx = dig_h
+        .find(&["IMEI2", "imei2"])
+        .ok_or("已上传数码.xlsx: 缺少必要列 [IMEI2]")?;
 
     for row in &dig_up[1..] {
         if cell_to_string(&row[d_st_idx]) == "审核失败" {
@@ -937,7 +941,7 @@ fn build_refund_anomaly_sheet(
         0,
         1,
         23,
-        "提取规则：筛选本店核销商编且单元格为粉色填充（颜色 #FFC7CE）；金额单位：元",
+        "提取规则：筛选本店核销商编且单元格为粉色填充（颜色 #FFC7CE）；按交易参考号升序；金额单位：元",
         &s.subtitle,
     )
     .map_err(|e| e.to_string())?;
@@ -956,6 +960,9 @@ fn build_refund_anomaly_sheet(
         let mch_idx = h
             .find(&["核销商编"])
             .ok_or(format!("{:?} 缺少核销商编", path))?;
+        let ref_idx = h
+            .find(&["交易参考号"])
+            .ok_or(format!("{:?} 缺少交易参考号", path))?;
 
         ws.set_row_height(*start_row, 24.0)
             .map_err(|e| e.to_string())?;
@@ -977,25 +984,33 @@ fn build_refund_anomaly_sheet(
         }
         *start_row += 1;
 
-        // Write data rows
-        for (r_idx, row) in rows.iter().enumerate().skip(1) {
-            let excel_row_num = (r_idx + 1) as u32;
-            let mch = cell_to_string(&row[mch_idx]);
+        let mut matched_rows: Vec<&Vec<Data>> = rows
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter_map(|(r_idx, row)| {
+                let excel_row_num = (r_idx + 1) as u32;
+                (cell_to_string(&row[mch_idx]) == store_code && pink_rows.contains(&excel_row_num))
+                    .then_some(row)
+            })
+            .collect();
+        matched_rows.sort_by_key(|row| {
+            let reference = cell_to_string(&row[ref_idx]);
+            (reference.is_empty(), reference)
+        });
 
-            // Dual filter: store_code AND pink fill
-            if mch == store_code && pink_rows.contains(&excel_row_num) {
-                ws.set_row_height(*start_row, 22.0)
-                    .map_err(|e| e.to_string())?;
-                for col in 0..24 {
-                    let val = if col < row.len() {
-                        &row[col]
-                    } else {
-                        &Data::Empty
-                    };
-                    write_refund_cell(ws, s, *start_row, col as u16, val)?;
-                }
-                *start_row += 1;
+        for row in matched_rows {
+            ws.set_row_height(*start_row, 22.0)
+                .map_err(|e| e.to_string())?;
+            for col in 0..24 {
+                let val = if col < row.len() {
+                    &row[col]
+                } else {
+                    &Data::Empty
+                };
+                write_refund_cell(ws, s, *start_row, col as u16, val)?;
             }
+            *start_row += 1;
         }
         Ok(())
     };
@@ -1064,14 +1079,18 @@ fn build_invoice_anomaly_sheet(
         .map_err(|e| e.to_string())?;
 
     // Column Headers
+    if invoices[0].len() < 8 {
+        return Err("发票明细.xlsx: 表头不足 8 列".to_string());
+    }
     ws.set_row_height(4, 30.0).map_err(|e| e.to_string())?;
-    for col in 0..8 {
-        let h_name = cell_to_string(&invoices[0][col]);
+    for (col, cell) in invoices[0].iter().take(8).enumerate() {
+        let h_name = cell_to_string(cell);
         ws.write_string_with_format(4, col as u16, h_name, &s.col_header)
             .map_err(|e| e.to_string())?;
     }
 
     let yellow_rows = get_colored_row_indices(invoice_path, "FFFFEB9C")?;
+    let pink_rows = get_colored_row_indices(invoice_path, "FFFFC7CE")?;
     let h = HeaderMap::from_header_row(&invoices[0]);
     let doc_no_idx = h.find(&["匹配单据号"]).ok_or("发票明细缺少匹配单据号")?;
 
@@ -1079,7 +1098,7 @@ fn build_invoice_anomaly_sheet(
     let mut collected: Vec<&Vec<Data>> = Vec::new();
     for (r_idx, row) in invoices.iter().enumerate().skip(1) {
         let excel_row_num = (r_idx + 1) as u32;
-        if yellow_rows.contains(&excel_row_num) {
+        if yellow_rows.contains(&excel_row_num) && !pink_rows.contains(&excel_row_num) {
             collected.push(row);
         }
     }
@@ -1090,22 +1109,18 @@ fn build_invoice_anomaly_sheet(
         (s.is_empty(), s)
     });
 
-    let mut cur_row: u32 = 5;
-    for row in collected {
+    for (cur_row, row) in (5_u32..).zip(collected) {
         ws.set_row_height(cur_row, 22.0)
             .map_err(|e| e.to_string())?;
-        for col in 0..8 {
-            let val = cell_to_string(&row[col]);
+        for (col, cell) in row.iter().take(8).enumerate() {
             if col == 0 {
-                // 开票时间
-                ws.write_string_with_format(cur_row, col as u16, val, &s.datetime)
-                    .map_err(|e| e.to_string())?;
+                write_date_cell(ws, cur_row, col as u16, cell, &s.datetime)?;
             } else {
+                let val = cell_to_string(cell);
                 ws.write_string_with_format(cur_row, col as u16, val, &s.text_left)
                     .map_err(|e| e.to_string())?;
             }
         }
-        cur_row += 1;
     }
 
     Ok(())

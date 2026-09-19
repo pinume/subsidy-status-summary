@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 calamine = { version = "0.36.1", features = ["dates"] }
-chrono = "0.4.45"
 quick-xml = "0.41"
 rust_decimal = "1.43"
 rust_xlsxwriter = { version = "0.99.1", features = ["chrono", "rust_decimal"] }

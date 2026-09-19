@@ -257,7 +257,6 @@ name = "data_status_summary"
 version = "0.1.0"
 dependencies = [
  "calamine",
- "chrono",
  "quick-xml",
  "rust_decimal",
  "rust_xlsxwriter",

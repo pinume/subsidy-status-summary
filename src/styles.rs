@@ -21,8 +21,8 @@ pub struct StylePool {
     pub datetime: Format,
 }
 
-impl StylePool {
-    pub fn new() -> Self {
+impl Default for StylePool {
+    fn default() -> Self {
         let border_color = Color::RGB(0xD9D9D9);
         let border_style = FormatBorder::Thin;
         let font_family = "微软雅黑";

@@ -1,7 +1,10 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 
 use data_status_summary::{generate_store_finance_workbook, generate_summary_workbook};
 
@@ -148,11 +151,24 @@ fn run_job(
     println!("\n正在处理: {} ...", name);
     let start = Instant::now();
     let target = output_dir.join(name);
-    let tmp = output_dir.join(format!(".tmp_{}", name));
+    let tmp = output_dir.join(format!(".tmp_{}_{}", std::process::id(), name));
+    let lock_path = output_dir.join(format!(".lock_{}", name));
+    // ponytail: a crashed process can leave this lock behind; use OS locks if that becomes common.
+    let _lock = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(lock) => lock,
+        Err(e) => {
+            eprintln!("已有相同报表任务正在运行，无法开始处理: {}", e);
+            return;
+        }
+    };
 
     match generator(input_dir, &tmp) {
         Ok(_) => {
-            if let Err(e) = fs::rename(&tmp, &target) {
+            if let Err(e) = replace_file(&tmp, &target) {
                 eprintln!("保存失败: {}", e);
                 let _ = fs::remove_file(&tmp);
             } else {
@@ -163,5 +179,38 @@ fn run_job(
             eprintln!("处理失败: {}", e);
             let _ = fs::remove_file(&tmp);
         }
+    }
+    let _ = fs::remove_file(lock_path);
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
+    fs::rename(source, target)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(source: *const u16, target: *const u16, flags: u32) -> i32;
+    }
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: both paths are NUL-terminated and remain alive for the duration of the call.
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }

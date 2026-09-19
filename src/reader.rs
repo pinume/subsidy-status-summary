@@ -21,6 +21,9 @@ pub fn read_sheet_rows(path: &Path) -> Result<Vec<Vec<Data>>, String> {
         .map_err(|e| format!("读取工作表 {} 失败: {}", sheet_names[0], e))?;
 
     let rows: Vec<Vec<Data>> = range.rows().map(|r| r.to_vec()).collect();
+    if rows.first().is_none_or(Vec::is_empty) {
+        return Err(format!("文件 {:?} 的首个工作表为空", path));
+    }
     Ok(rows)
 }
 
@@ -209,13 +212,12 @@ pub fn get_colored_row_indices(path: &Path, target_hex: &str) -> Result<HashSet<
                     b"xf" if in_cell_xfs => {
                         let mut fill_id = 0;
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"fillId" {
-                                if let Ok(id) = std::str::from_utf8(&attr.value)
+                            if attr.key.as_ref() == b"fillId"
+                                && let Ok(id) = std::str::from_utf8(&attr.value)
                                     .unwrap_or("0")
                                     .parse::<usize>()
-                                {
-                                    fill_id = id;
-                                }
+                            {
+                                fill_id = id;
                             }
                         }
                         xf_fill_ids.push(fill_id);
@@ -240,13 +242,12 @@ pub fn get_colored_row_indices(path: &Path, target_hex: &str) -> Result<HashSet<
         // Identify target XF indices
         let mut xfs = HashSet::new();
         for (xf_idx, &fill_id) in xf_fill_ids.iter().enumerate() {
-            if let Some(Some(color)) = fills.get(fill_id) {
-                if color == &clean_target
+            if let Some(Some(color)) = fills.get(fill_id)
+                && (color == &clean_target
                     || color.ends_with(&clean_target)
-                    || clean_target.ends_with(color)
-                {
-                    xfs.insert(xf_idx);
-                }
+                    || clean_target.ends_with(color))
+            {
+                xfs.insert(xf_idx);
             }
         }
         xfs
@@ -273,27 +274,25 @@ pub fn get_colored_row_indices(path: &Path, target_hex: &str) -> Result<HashSet<
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => match e.name().as_ref() {
                 b"row" => {
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"r" {
-                            if let Ok(r) = std::str::from_utf8(&attr.value)
+                        if attr.key.as_ref() == b"r"
+                            && let Ok(r) = std::str::from_utf8(&attr.value)
                                 .unwrap_or("0")
                                 .parse::<u32>()
-                            {
-                                current_row = r;
-                            }
+                        {
+                            current_row = r;
                         }
                     }
                 }
                 b"c" => {
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"s" {
-                            if let Ok(s) = std::str::from_utf8(&attr.value)
+                        if attr.key.as_ref() == b"s"
+                            && let Ok(s) = std::str::from_utf8(&attr.value)
                                 .unwrap_or("0")
                                 .parse::<usize>()
-                            {
-                                if target_xfs.contains(&s) && current_row > 0 {
-                                    matching_rows.insert(current_row);
-                                }
-                            }
+                            && target_xfs.contains(&s)
+                            && current_row > 0
+                        {
+                            matching_rows.insert(current_row);
                         }
                     }
                 }
