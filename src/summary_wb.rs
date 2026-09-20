@@ -1,7 +1,9 @@
 use calamine::Data;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
-use rust_xlsxwriter::{Workbook, Worksheet};
+use rust_xlsxwriter::{
+    Color, ConditionalFormatFormula, Format, Workbook, Worksheet, column_number_to_name,
+};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -941,7 +943,7 @@ fn build_refund_anomaly_sheet(
         0,
         1,
         23,
-        "提取规则：筛选本店核销商编且单元格为粉色填充（颜色 #FFC7CE）；按交易参考号升序；金额单位：元",
+        "提取规则：筛选本店核销商编且单元格为粉色填充（颜色 #FFC7CE）；重复交易参考号在前，不重复记录在后并标黄；组内升序；金额单位：元",
         &s.subtitle,
     )
     .map_err(|e| e.to_string())?;
@@ -994,11 +996,20 @@ fn build_refund_anomaly_sheet(
                     .then_some(row)
             })
             .collect();
+        let reference_counts = matched_rows.iter().fold(HashMap::new(), |mut counts, row| {
+            *counts.entry(cell_to_string(&row[ref_idx])).or_insert(0) += 1;
+            counts
+        });
         matched_rows.sort_by_key(|row| {
             let reference = cell_to_string(&row[ref_idx]);
-            (reference.is_empty(), reference)
+            (
+                reference.is_empty(),
+                reference_counts[&reference] == 1,
+                reference,
+            )
         });
 
+        let data_start_row = *start_row;
         for row in matched_rows {
             ws.set_row_height(*start_row, 22.0)
                 .map_err(|e| e.to_string())?;
@@ -1011,6 +1022,20 @@ fn build_refund_anomaly_sheet(
                 write_refund_cell(ws, s, *start_row, col as u16, val)?;
             }
             *start_row += 1;
+        }
+
+        if data_start_row < *start_row {
+            let reference_col = column_number_to_name(ref_idx as u16);
+            let first_row = data_start_row + 1;
+            let last_row = *start_row;
+            let rule = format!(
+                "=AND(${reference_col}{first_row}<>\"\",COUNTIF(${reference_col}${first_row}:${reference_col}${last_row},${reference_col}{first_row})=1)"
+            );
+            let highlight = ConditionalFormatFormula::new()
+                .set_rule(rule.as_str())
+                .set_format(Format::new().set_background_color(Color::RGB(0xFFF2CC)));
+            ws.add_conditional_format(data_start_row, 0, *start_row - 1, 23, &highlight)
+                .map_err(|e| e.to_string())?;
         }
         Ok(())
     };

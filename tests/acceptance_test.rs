@@ -1,5 +1,6 @@
 use calamine::{Data, DataType, Reader, open_workbook_auto};
 use data_status_summary::{generate_store_finance_workbook, generate_summary_workbook};
+use std::collections::HashMap;
 use std::path::Path;
 
 #[test]
@@ -108,7 +109,17 @@ fn test_all_acceptance_benchmarks() {
             })
             .collect::<Vec<_>>(),
     ] {
-        assert!(references.windows(2).all(|pair| pair[0] <= pair[1]));
+        let counts = references
+            .iter()
+            .fold(HashMap::new(), |mut counts, (_, value)| {
+                *counts.entry(value).or_insert(0) += 1;
+                counts
+            });
+        let keys: Vec<_> = references
+            .iter()
+            .map(|(empty, value)| (*empty, counts[value] == 1, value))
+            .collect();
+        assert!(keys.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 
     // Verify 异常发票明细 has 38 rows (Row 6-43)
